@@ -242,6 +242,7 @@ class VoxCPMBackend:
         is_v2 = self.model_size == "2B"
         ref_audio = (voice_prompt or {}).get("ref_audio")
         ref_text = ((voice_prompt or {}).get("ref_text") or "").strip()
+        style = instruct.strip().strip("()").strip() if (is_v2 and instruct) else ""
 
         kwargs = {
             "cfg_value": CFG_VALUE,
@@ -254,9 +255,13 @@ class VoxCPMBackend:
             if is_v2:
                 # Reference clip alone clones the timbre; adding the clip +
                 # transcript as a continuation prompt is the model card's
-                # highest-similarity mode.
+                # highest-similarity mode. A style prefix only works in the
+                # reference-only mode: in continuation mode the model reads
+                # "(style)" as words to speak (upstream's CLI rejects
+                # --control together with --prompt-text for the same reason),
+                # so drop the continuation prompt when a style is given.
                 kwargs["reference_wav_path"] = ref_audio
-                if ref_text:
+                if ref_text and not style:
                     kwargs["prompt_wav_path"] = ref_audio
                     kwargs["prompt_text"] = ref_text
             else:
@@ -268,10 +273,7 @@ class VoxCPMBackend:
                 kwargs["prompt_wav_path"] = ref_audio
                 kwargs["prompt_text"] = ref_text
 
-        target_text = text
-        if is_v2 and instruct and instruct.strip():
-            style = instruct.strip().strip("()")
-            target_text = f"({style}){text}"
+        target_text = f"({style}){text}" if style else text
 
         def _generate_sync() -> Tuple[np.ndarray, int]:
             import torch
