@@ -71,6 +71,12 @@ const MODEL_DESCRIPTIONS: Record<string, string> = {
     'Kokoro 82M by hexgrad. Tiny 82M-parameter TTS that runs at CPU realtime. Supports 8 languages with pre-built voice styles. Apache 2.0 licensed.',
   omnivoice:
     'OmniVoice by k2-fsa. Zero-shot voice cloning via a diffusion language model, plus attribute-based voice design (gender, age, pitch, accent). The model covers 600+ languages; Voicebox exposes the 23 in its own language list. 24kHz output. NON-COMMERCIAL: the weights are CC-BY-NC (code is Apache 2.0; the bundled Higgs Audio V2 codec is under the Boson community licence), so do not use output commercially.',
+  'zonos3-mini':
+    'ZONOS3 Mini by Zyphra. Compact MoE TTS (~100M active / 800M total parameters) with zero-shot voice cloning (no transcript needed) and 25 built-in voices. 43 languages (Voicebox exposes 22), 44.1kHz output. Apache 2.0 weights.',
+  'voxcpm-2b':
+    'VoxCPM2 by OpenBMB. Tokenizer-free 2B TTS with high-fidelity voice cloning and style control via the instruct box (e.g. "cheerful, slightly faster"). 30 languages, 48kHz output. Needs ~8GB VRAM. Apache 2.0.',
+  'voxcpm-0.5b':
+    'VoxCPM 0.5B by OpenBMB. The original, lighter bilingual (Chinese/English) VoxCPM. Clones by prompt continuation, so voice samples need their reference text. 16kHz output. Apache 2.0 (model card: research use recommended).',
   'qwen-custom-voice-1.7B':
     'Qwen3-TTS CustomVoice 1.7B by Alibaba. 9 premium preset voices with instruct-based style control for tone, emotion, and prosody. Supports 10 languages.',
   'qwen-custom-voice-0.6B':
@@ -420,7 +426,9 @@ export function ModelManagement() {
         m.model_name.startsWith('chatterbox') ||
         m.model_name.startsWith('tada') ||
         m.model_name.startsWith('kokoro') ||
-        m.model_name.startsWith('omnivoice'),
+        m.model_name.startsWith('omnivoice') ||
+        m.model_name.startsWith('zonos3') ||
+        m.model_name.startsWith('voxcpm'),
     ) ?? [];
   const whisperModels = modelStatus?.models.filter((m) => m.model_name.startsWith('whisper')) ?? [];
   const llmModels = modelStatus?.models.filter((m) => m.model_name.startsWith('qwen3-')) ?? [];

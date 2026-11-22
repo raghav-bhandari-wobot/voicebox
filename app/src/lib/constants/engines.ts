@@ -9,12 +9,14 @@
  * VoiceDesign take free-form prose ("speak in an angry tone"; VoiceDesign
  * layers it on top of the profile's stored design prompt), while OmniVoice
  * takes a closed vocabulary of attributes ("female, low pitch, british
- * accent") and raises on anything outside it.
+ * accent") and raises on anything outside it. VoxCPM (VoxCPM2 size only) sends
+ * it as the model's parenthesised style prefix ("cheerful, slightly faster").
  */
 export const INSTRUCT_ENGINES: ReadonlySet<string> = new Set([
   'qwen_custom_voice',
   'qwen_voice_design',
   'omnivoice',
+  'voxcpm',
 ]);
 
 /** Whether the given engine should show and forward the instruct field. */

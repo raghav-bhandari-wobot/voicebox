@@ -76,6 +76,8 @@ const DEFAULT_ENGINE_OPTIONS = [
   { value: 'tada', label: 'TADA' },
   { value: 'kokoro', label: 'Kokoro 82M' },
   { value: 'omnivoice', label: 'OmniVoice (non-commercial)' },
+  { value: 'zonos3', label: 'ZONOS3 Mini' },
+  { value: 'voxcpm', label: 'VoxCPM' },
 ] as const;
 
 function makeProfileSchema(t: (key: string) => string) {
@@ -1000,6 +1002,7 @@ export function ProfileForm() {
                               <SelectContent>
                                 <SelectItem value="kokoro">Kokoro 82M</SelectItem>
                                 <SelectItem value="qwen_custom_voice">Qwen CustomVoice</SelectItem>
+                                <SelectItem value="zonos3">ZONOS3 Mini</SelectItem>
                               </SelectContent>
                             </Select>
                           </FormItem>

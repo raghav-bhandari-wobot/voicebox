@@ -154,7 +154,9 @@ export function FloatingGenerateBox({
     | 'kokoro'
     | 'qwen_custom_voice'
     | 'qwen_voice_design'
-    | 'omnivoice';
+    | 'omnivoice'
+    | 'zonos3'
+    | 'voxcpm';
   useEffect(() => {
     if (selectedProfile?.language) {
       form.setValue('language', selectedProfile.language as LanguageCode);
@@ -535,7 +537,9 @@ export function FloatingGenerateBox({
                             placeholder={
                               form.watch('engine') === 'omnivoice'
                                 ? t('generation.instruct.placeholderOmnivoice')
-                                : t('generation.instruct.placeholder')
+                                : form.watch('engine') === 'voxcpm'
+                                  ? t('generation.instruct.placeholderVoxcpm')
+                                  : t('generation.instruct.placeholder')
                             }
                             className="resize-none bg-transparent border border-accent/20 focus-visible:ring-1 focus-visible:ring-accent/40 rounded-2xl text-sm placeholder:text-muted-foreground/60 w-full px-3 py-2"
                             style={{ minHeight: '60px', maxHeight: '160px' }}

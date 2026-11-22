@@ -17,7 +17,7 @@ const generationSchema = z.object({
   text: z.string().min(1, '').max(50000),
   language: z.enum(LANGUAGE_CODES as [LanguageCode, ...LanguageCode[]]),
   seed: z.number().int().optional(),
-  modelSize: z.enum(['1.7B', '0.6B', '1B', '3B']).optional(),
+  modelSize: z.enum(['1.7B', '0.6B', '1B', '3B', '2B', '0.5B']).optional(),
   instruct: z.string().max(500).optional(),
   engine: z
     .enum([
@@ -30,6 +30,8 @@ const generationSchema = z.object({
       'tada',
       'kokoro',
       'omnivoice',
+      'zonos3',
+      'voxcpm',
     ])
     .optional(),
   personality: z.boolean().optional(),
@@ -90,6 +92,9 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
 
     try {
       const engine = data.engine || 'qwen';
+      // The size field is shared across engines and can still hold another
+      // engine's value (e.g. Qwen's 1.7B) after an auto-switch.
+      const voxcpmSize = data.modelSize === '0.5B' ? '0.5B' : '2B';
       const modelName =
         engine === 'luxtts'
           ? 'luxtts'
@@ -107,6 +112,12 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
                     ? 'qwen-voice-design-1.7B'
                     : engine === 'omnivoice'
                       ? 'omnivoice'
+                      : engine === 'zonos3'
+                        ? 'zonos3-mini'
+                        : engine === 'voxcpm'
+                          ? voxcpmSize === '0.5B'
+                            ? 'voxcpm-0.5b'
+                            : 'voxcpm-2b'
                       : engine === 'qwen_custom_voice'
                         ? `qwen-custom-voice-${data.modelSize}`
                         : `qwen-tts-${data.modelSize}`;
@@ -127,6 +138,12 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
                     ? 'Qwen VoiceDesign 1.7B'
                     : engine === 'omnivoice'
                       ? 'OmniVoice'
+                      : engine === 'zonos3'
+                        ? 'ZONOS3 Mini'
+                        : engine === 'voxcpm'
+                          ? voxcpmSize === '0.5B'
+                            ? 'VoxCPM 0.5B'
+                            : 'VoxCPM2 2B'
                       : engine === 'qwen_custom_voice'
                         ? data.modelSize === '1.7B'
                           ? 'Qwen CustomVoice 1.7B'
@@ -149,7 +166,10 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
       }
 
       const hasModelSizes =
-        engine === 'qwen' || engine === 'qwen_custom_voice' || engine === 'tada';
+        engine === 'qwen' ||
+        engine === 'qwen_custom_voice' ||
+        engine === 'tada' ||
+        engine === 'voxcpm';
       const supportsInstruct = engineSupportsInstruct(engine);
       const effectsChain = options.getEffectsChain?.();
       // This now returns immediately with status="generating"
@@ -158,7 +178,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
         text: data.text,
         language: data.language,
         seed: data.seed,
-        model_size: hasModelSizes ? data.modelSize : undefined,
+        model_size: engine === 'voxcpm' ? voxcpmSize : hasModelSizes ? data.modelSize : undefined,
         engine,
         instruct: supportsInstruct ? data.instruct || undefined : undefined,
         personality: data.personality || undefined,
