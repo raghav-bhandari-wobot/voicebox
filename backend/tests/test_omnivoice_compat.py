@@ -360,3 +360,174 @@ def test_ensure_asr_is_a_noop_once_loaded():
     backend._asr_loaded = True
 
     backend._ensure_asr()  # must not raise
+
+
+# ── rope_parameters (5.x) -> rope_theta (4.57.6) ──────────────────────
+# OmniVoice's config.json stores the Qwen3 backbone's RoPE base as
+# rope_parameters={"rope_theta": 1e6}. 4.57.6 ignores that and silently uses
+# 10000, which turns every voice clone into fluent gibberish.
+
+# The relevant slice of k2-fsa/OmniVoice config.json -> llm_config.
+_OMNIVOICE_LLM_CONFIG = {
+    "model_type": "qwen3",
+    "head_dim": 128,
+    "hidden_size": 1024,
+    "intermediate_size": 3072,
+    "num_attention_heads": 16,
+    "num_hidden_layers": 2,
+    "num_key_value_heads": 8,
+    "max_position_embeddings": 40960,
+    "rope_parameters": {"rope_theta": 1000000, "rope_type": "default"},
+    "vocab_size": 64,
+}
+
+
+def _qwen3_config(**overrides):
+    from transformers import Qwen3Config
+
+    return Qwen3Config(**dict(_OMNIVOICE_LLM_CONFIG, **overrides))
+
+
+@pytest.fixture
+def transformers_4():
+    if compat._transformers_major() >= 5:  # pragma: no cover - future upgrade
+        pytest.skip("transformers >= 5 reads rope_parameters natively")
+
+
+def test_rope_parameters_are_ignored_without_the_backport(transformers_4):
+    """Pins the upstream behaviour the backport exists for.
+
+    If this starts failing, 4.57.x learned to read rope_parameters and the
+    backport can go.
+    """
+    assert _qwen3_config().rope_theta == 10000.0
+
+
+def test_backport_restores_rope_theta(transformers_4):
+    config = _qwen3_config()
+    assert compat.backport_rope_parameters(config) is True
+    assert config.rope_theta == 1000000.0
+    assert config.rope_scaling is None
+
+
+def test_backport_is_idempotent(transformers_4):
+    config = _qwen3_config()
+    compat.backport_rope_parameters(config)
+    assert compat.backport_rope_parameters(config) is False
+    assert config.rope_theta == 1000000.0
+
+
+def test_backport_ignores_configs_without_rope_parameters(transformers_4):
+    config = _qwen3_config(rope_parameters=None, rope_theta=500000.0)
+    assert compat.backport_rope_parameters(config) is False
+    assert config.rope_theta == 500000.0
+
+
+def test_backport_carries_non_default_rope_type_into_rope_scaling(transformers_4):
+    config = _qwen3_config(
+        rope_parameters={"rope_theta": 1000000, "rope_type": "linear", "factor": 2.0}
+    )
+    compat.backport_rope_parameters(config)
+    assert config.rope_theta == 1000000.0
+    assert config.rope_scaling == {"rope_type": "linear", "factor": 2.0}
+
+
+def test_backported_config_builds_rotary_embedding_with_trained_base(transformers_4):
+    """End to end on the real rotary module: the base must reach inv_freq."""
+    from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
+
+    config = _qwen3_config()
+    compat.backport_rope_parameters(config)
+    inv_freq = Qwen3RotaryEmbedding(config).inv_freq
+
+    head_dim = config.head_dim
+    expected = 1.0 / (
+        1000000.0 ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float() / head_dim)
+    )
+    assert torch.allclose(inv_freq.float().cpu(), expected)
+
+
+def test_load_model_hands_omnivoice_a_backported_config(monkeypatch, transformers_4):
+    """The backend must fix the config *before* from_pretrained builds the LLM."""
+    import contextlib
+
+    compat.install()
+    try:
+        import omnivoice
+        from omnivoice.models import omnivoice as omnivoice_module
+    except ImportError as exc:  # pragma: no cover - omnivoice not installed
+        pytest.skip(f"omnivoice unavailable: {exc}")
+
+    from backend.backends import omnivoice_backend
+
+    seen = {}
+
+    def fake_config_from_pretrained(name, *args, **kwargs):
+        return omnivoice_module.OmniVoiceConfig(llm_config=dict(_OMNIVOICE_LLM_CONFIG))
+
+    def fake_model_from_pretrained(name, *args, **kwargs):
+        seen["config"] = kwargs.get("config")
+        return object()
+
+    monkeypatch.setattr(
+        omnivoice_module.OmniVoiceConfig,
+        "from_pretrained",
+        staticmethod(fake_config_from_pretrained),
+    )
+    monkeypatch.setattr(
+        omnivoice.OmniVoice, "from_pretrained", staticmethod(fake_model_from_pretrained)
+    )
+    monkeypatch.setattr(
+        omnivoice_backend,
+        "model_load_progress",
+        lambda *args, **kwargs: contextlib.nullcontext(),
+    )
+
+    backend = omnivoice_backend.OmniVoiceBackend()
+    monkeypatch.setattr(backend, "_is_model_cached", lambda *a, **k: True)
+    backend._device = "cpu"
+    backend._load_model_sync()
+
+    assert seen["config"] is not None
+    assert seen["config"].llm_config.rope_theta == 1000000.0
+
+
+# ── voice prompt encoding runs without autograd ───────────────────────
+
+
+def test_create_voice_prompt_encodes_under_inference_mode(monkeypatch):
+    """Regression: upstream create_voice_clone_prompt has no inference_mode.
+
+    With grad enabled the codec's DAC encoder kept every activation alive and a
+    22 s reference clip ran an 8 GB GPU out of memory.
+    """
+    import asyncio
+
+    from backend.backends import omnivoice_backend
+    from backend.backends.omnivoice_backend import OmniVoiceBackend
+
+    seen = {}
+
+    class FakePrompt:
+        ref_audio_tokens = torch.zeros(8, 4, dtype=torch.long)
+        ref_text = "hello."
+        ref_rms = 0.1
+
+    class FakeModel:
+        def create_voice_clone_prompt(self, ref_audio, ref_text):
+            seen["inference_mode"] = torch.is_inference_mode_enabled()
+            seen["grad"] = torch.is_grad_enabled()
+            return FakePrompt()
+
+    backend = OmniVoiceBackend()
+    backend.model = FakeModel()
+
+    prompt, cached = asyncio.run(
+        backend.create_voice_prompt("ref.wav", "hello", use_cache=False)
+    )
+
+    assert seen == {"inference_mode": True, "grad": False}
+    assert cached is False
+    assert prompt["ref_audio_tokens"].shape == (8, 4)
+    # The cached prompt must be usable (and saveable) outside inference mode.
+    assert not prompt["ref_audio_tokens"].is_inference()

@@ -4,7 +4,7 @@ Voicebox cannot move to transformers 5: the offline-mode fix in
 ``backend/utils/hf_offline_patch.py`` and the frozen-build rewrite in
 ``backend/pyi_rth_torch_compiler_disable.py`` both read 4.57.x internals, and
 seven shipping engines depend on them. OmniVoice, however, was authored against
-transformers 5.3+ and trips over two gaps:
+transformers 5.3+ and trips over three gaps:
 
 1. Its audio codec is ``transformers.HiggsAudioV2TokenizerModel``, a class that
    does not exist before 5.3. The weights ship inside the OmniVoice repo, so
@@ -12,9 +12,17 @@ transformers 5.3+ and trips over two gaps:
    ``backend/vendor/higgs_audio_v2_tokenizer`` and graft it on.
 2. Its ``tokenizer_config.json`` writes ``extra_special_tokens`` as a list,
    the 5.x form. 4.57.6 expects a mapping and raises ``AttributeError``.
+3. Its ``config.json`` writes the Qwen3 backbone's RoPE settings as
+   ``rope_parameters = {"rope_theta": ...}``, the 5.x form. 4.57.6 only reads
+   a top-level ``rope_theta`` and silently falls back to 10000 instead of the
+   trained 1e6. That one does not crash: every generation runs with the wrong
+   positional encoding, and voice clones (long prompts) come out as fluent
+   gibberish. ``backport_rope_parameters`` fixes a config object; the caller
+   applies it, because it has to happen before the model is built.
 
-Both fixes are additive: they add a name that was absent, and accept an input
-shape that previously crashed. Neither changes behaviour for the other engines.
+The first two are applied by ``install()``. All three are additive: they add a
+name that was absent, accept an input shape that previously crashed, or fill
+in a value 4.57.6 failed to read. None changes behaviour for other engines.
 
 Same spirit as ``backend/utils/dac_shim.py``, which fakes ``dac.nn.layers`` so
 TADA can skip the descript-audio-codec dependency tree. The direction differs:
@@ -178,3 +186,68 @@ def _attribute_name(token: str) -> str:
         stem = stem.replace(delimiter, "")
     stem = "".join(char if char.isalnum() else "_" for char in stem).strip("_").lower()
     return f"{stem or 'extra'}_token"
+
+
+# ---------------------------------------------------------------------------
+# 3. rope_parameters
+# ---------------------------------------------------------------------------
+
+
+def backport_rope_parameters(config) -> bool:
+    """Copy 5.x ``rope_parameters`` onto the fields 4.57.6 actually reads.
+
+    transformers 5 folded ``rope_theta`` and ``rope_scaling`` into a single
+    ``rope_parameters`` dict. A 4.57.6 config class built from a 5.x
+    config.json keeps that dict as an inert attribute and leaves ``rope_theta``
+    at its class default, so the rotary embedding is computed with the wrong
+    base and nothing warns.
+
+    Must run before the model is instantiated: the rotary embedding reads the
+    config once, in its ``__init__``.
+
+    Returns:
+        True if the config was changed, False if it carries no 5.x RoPE dict,
+        already agrees with it, or the running transformers reads it natively.
+    """
+    params = getattr(config, "rope_parameters", None)
+    if not isinstance(params, dict) or "rope_theta" not in params:
+        return False
+
+    if _transformers_major() >= 5:
+        return False
+
+    changed = False
+
+    theta = float(params["rope_theta"])
+    if getattr(config, "rope_theta", None) != theta:
+        logger.info(
+            "backporting rope_theta=%s from rope_parameters (was %s)",
+            theta,
+            getattr(config, "rope_theta", None),
+        )
+        config.rope_theta = theta
+        changed = True
+
+    # Non-default RoPE (yarn, linear, llama3, ...) travels in rope_scaling on
+    # 4.57.6, keyed the same way minus the theta.
+    rope_type = params.get("rope_type", params.get("type", "default"))
+    if rope_type != "default" and not getattr(config, "rope_scaling", None):
+        config.rope_scaling = {k: v for k, v in params.items() if k != "rope_theta"}
+        changed = True
+
+    if "partial_rotary_factor" in params and getattr(
+        config, "partial_rotary_factor", None
+    ) != params["partial_rotary_factor"]:
+        config.partial_rotary_factor = params["partial_rotary_factor"]
+        changed = True
+
+    return changed
+
+
+def _transformers_major() -> int:
+    import transformers
+
+    try:
+        return int(str(transformers.__version__).split(".", 1)[0])
+    except ValueError:  # pragma: no cover - unparseable dev build
+        return 0

@@ -152,11 +152,15 @@ class OmniVoiceBackend:
             # Must precede the omnivoice import: omnivoice does
             # `from transformers import HiggsAudioV2TokenizerModel` at module
             # scope, and on transformers 4.57.x that name does not exist.
-            from ..utils.transformers5_compat import install as install_transformers5_compat
+            from ..utils.transformers5_compat import (
+                backport_rope_parameters,
+                install as install_transformers5_compat,
+            )
 
             install_transformers5_compat()
 
             from omnivoice import OmniVoice
+            from omnivoice.models.omnivoice import OmniVoiceConfig
 
             device = self.device
             # fp16 on accelerators, fp32 on CPU and MPS. MPS fp16 underflows
@@ -169,8 +173,18 @@ class OmniVoiceBackend:
 
             logger.info("Loading OmniVoice on %s (%s)...", device, dtype)
 
+            # The checkpoint's config.json stores the Qwen3 backbone's RoPE
+            # base in the transformers 5 ``rope_parameters`` form, which
+            # 4.57.x ignores, defaulting to 10000 instead of 1e6. Load the
+            # config ourselves, fix it, and hand it in: the rotary embedding
+            # is built from it during from_pretrained, so it cannot be patched
+            # afterwards. Without this, clones are unintelligible.
+            config = OmniVoiceConfig.from_pretrained(OMNIVOICE_HF_REPO)
+            backport_rope_parameters(config.llm_config)
+
             self.model = OmniVoice.from_pretrained(
                 OMNIVOICE_HF_REPO,
+                config=config,
                 device_map=device,
                 dtype=dtype,
             )
@@ -248,17 +262,28 @@ class OmniVoiceBackend:
                 return cached, True
 
         def _encode_sync() -> dict:
+            import torch
+
             ref_text = reference_text or None
             if ref_text is None:
                 self._ensure_asr()
 
-            prompt = self.model.create_voice_clone_prompt(
-                ref_audio=str(audio_path),
-                ref_text=ref_text,
-            )
+            # Upstream's create_voice_clone_prompt is not decorated with
+            # inference_mode (generate() is). The codec weights require grad,
+            # so autograd keeps every activation of the DAC acoustic encoder
+            # alive: a 22 s reference climbed past 7.9 GB and took down an
+            # 8 GB GPU. Under inference_mode they are freed layer by layer.
+            with torch.inference_mode():
+                prompt = self.model.create_voice_clone_prompt(
+                    ref_audio=str(audio_path),
+                    ref_text=ref_text,
+                )
             return {
                 "format_version": _VOICE_CLONE_PROMPT_FORMAT_VERSION,
-                "ref_audio_tokens": prompt.ref_audio_tokens.detach().cpu(),
+                # clone() outside inference_mode: .cpu() is a no-op for a
+                # tokenizer kept on CPU (MPS hosts), and an inference tensor
+                # would refuse later in-place use outside inference mode.
+                "ref_audio_tokens": prompt.ref_audio_tokens.detach().cpu().clone(),
                 "ref_text": prompt.ref_text,
                 "ref_rms": float(prompt.ref_rms),
             }
