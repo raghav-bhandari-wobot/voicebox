@@ -66,10 +66,12 @@ async def run_generation(
     It is designed to be enqueued via ``services.task_queue.enqueue_generation``.
     """
     from ..backends import (
+        acquire_tts_engine,
         engine_needs_trim,
         engine_retries_runaway,
         get_tts_backend_for_engine,
         load_engine_model,
+        release_tts_engine,
     )
     from ..utils.chunked_tts import generate_chunked
     from ..utils.audio import has_tts_runaway, normalize_audio, save_audio, trim_tts_output
@@ -77,8 +79,13 @@ async def run_generation(
     task_manager = get_task_manager()
     bg_db = next(get_db())
     tts_model = None
+    engine_hold = None
 
     try:
+        # Hold the engine from load through generation so switching to another
+        # engine (with "unload other engines" on) waits instead of unloading it
+        # mid-generation.
+        engine_hold = await acquire_tts_engine(engine)
         tts_model = get_tts_backend_for_engine(engine)
 
         if not tts_model.is_loaded():
@@ -175,6 +182,8 @@ async def run_generation(
         task_manager.complete_generation(generation_id)
         bg_db.close()
         release_generation_memory(tts_model)
+        if engine_hold is not None:
+            await release_tts_engine(engine_hold)
 
 
 def _notify_speak_end(generation_id: str, *, status: str) -> None:
@@ -298,52 +307,55 @@ async def generate_audio_sync(
         engine_retries_runaway,
         get_tts_backend_for_engine,
         load_engine_model,
+        tts_engine_in_use,
     )
     from ..utils.chunked_tts import generate_chunked
     from ..utils.audio import has_tts_runaway, normalize_audio, trim_tts_output
     from . import tts
 
-    bg_db = next(get_db())
-    tts_model = None
-    try:
-        tts_model = get_tts_backend_for_engine(engine)
-        await load_engine_model(engine, model_size)
+    # Hold the engine from load through generation (see backends.tts_engine_in_use).
+    async with tts_engine_in_use(engine):
+        bg_db = next(get_db())
+        tts_model = None
+        try:
+            tts_model = get_tts_backend_for_engine(engine)
+            await load_engine_model(engine, model_size)
 
-        voice_prompt = await profiles.create_voice_prompt_for_profile(
-            profile_id,
-            bg_db,
-            use_cache=True,
-            engine=engine,
+            voice_prompt = await profiles.create_voice_prompt_for_profile(
+                profile_id,
+                bg_db,
+                use_cache=True,
+                engine=engine,
+            )
+        finally:
+            bg_db.close()
+
+        trim_fn = trim_tts_output if engine_needs_trim(engine) else None
+        runaway_detector = has_tts_runaway if engine_retries_runaway(engine) else None
+
+        gen_kwargs: dict = dict(
+            language=language,
+            seed=seed,
+            instruct=instruct,
+            trim_fn=trim_fn,
+            runaway_detector=runaway_detector,
         )
-    finally:
-        bg_db.close()
+        if max_chunk_chars is not None:
+            gen_kwargs["max_chunk_chars"] = max_chunk_chars
+        if crossfade_ms is not None:
+            gen_kwargs["crossfade_ms"] = crossfade_ms
 
-    trim_fn = trim_tts_output if engine_needs_trim(engine) else None
-    runaway_detector = has_tts_runaway if engine_retries_runaway(engine) else None
+        try:
+            audio, sample_rate = await generate_chunked(
+                tts_model, text, voice_prompt, **gen_kwargs
+            )
 
-    gen_kwargs: dict = dict(
-        language=language,
-        seed=seed,
-        instruct=instruct,
-        trim_fn=trim_fn,
-        runaway_detector=runaway_detector,
-    )
-    if max_chunk_chars is not None:
-        gen_kwargs["max_chunk_chars"] = max_chunk_chars
-    if crossfade_ms is not None:
-        gen_kwargs["crossfade_ms"] = crossfade_ms
+            if normalize:
+                audio = normalize_audio(audio)
 
-    try:
-        audio, sample_rate = await generate_chunked(
-            tts_model, text, voice_prompt, **gen_kwargs
-        )
-
-        if normalize:
-            audio = normalize_audio(audio)
-
-        return tts.audio_to_wav_bytes(audio, sample_rate)
-    finally:
-        release_generation_memory(tts_model)
+            return tts.audio_to_wav_bytes(audio, sample_rate)
+        finally:
+            release_generation_memory(tts_model)
 
 
 def _save_regenerate(

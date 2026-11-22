@@ -326,6 +326,17 @@ async def _run_startup(application: FastAPI) -> None:
     finally:
         db.close()
 
+    # Same for the "unload other TTS engines before loading" preference.
+    db = next(get_db())
+    try:
+        from .services.settings import bootstrap_generation_backend_config
+
+        bootstrap_generation_backend_config(db)
+    except Exception as e:
+        logger.warning("Could not bootstrap generation settings: %s", e)
+    finally:
+        db.close()
+
     backend_type = get_backend_type()
     logger.info("Backend: %s", backend_type.upper())
     logger.info("GPU: %s", _get_gpu_status())

@@ -291,6 +291,7 @@ async def _create_speech(request: Request, db: Session) -> Response:
         ensure_model_cached_or_raise,
         get_tts_backend_for_engine,
         load_engine_model,
+        tts_engine_in_use,
     )
     from ..mcp_server.resolve import resolve_profile
     from ..services import profiles
@@ -354,35 +355,38 @@ async def _create_speech(request: Request, db: Session) -> Response:
             param="model",
             code="model_not_downloaded",
         ) from exc
-    await load_engine_model(engine, model_size or "default")
-    tts_model = get_tts_backend_for_engine(engine)
+    # Hold the engine from load through generation so a concurrent switch to
+    # another engine waits instead of unloading it (backends.tts_engine_in_use).
+    async with tts_engine_in_use(engine):
+        await load_engine_model(engine, model_size or "default")
+        tts_model = get_tts_backend_for_engine(engine)
 
-    voice_prompt = await profiles.create_voice_prompt_for_profile(str(profile.id), db, engine=engine)
+        voice_prompt = await profiles.create_voice_prompt_for_profile(str(profile.id), db, engine=engine)
 
-    trim_fn = None
-    runaway_detector = None
-    if engine_needs_trim(engine):
-        from ..utils.audio import trim_tts_output
+        trim_fn = None
+        runaway_detector = None
+        if engine_needs_trim(engine):
+            from ..utils.audio import trim_tts_output
 
-        trim_fn = trim_tts_output
-    if engine_retries_runaway(engine):
-        from ..utils.audio import has_tts_runaway
+            trim_fn = trim_tts_output
+        if engine_retries_runaway(engine):
+            from ..utils.audio import has_tts_runaway
 
-        runaway_detector = has_tts_runaway
+            runaway_detector = has_tts_runaway
 
-    started = time.monotonic()
-    try:
-        audio, sample_rate = await generate_chunked(
-            tts_model,
-            data.input,
-            voice_prompt,
-            language=getattr(profile, "language", None) or "en",
-            instruct=data.instructions,
-            trim_fn=trim_fn,
-            runaway_detector=runaway_detector,
-        )
-    finally:
-        release_generation_memory(tts_model)
+        started = time.monotonic()
+        try:
+            audio, sample_rate = await generate_chunked(
+                tts_model,
+                data.input,
+                voice_prompt,
+                language=getattr(profile, "language", None) or "en",
+                instruct=data.instructions,
+                trim_fn=trim_fn,
+                runaway_detector=runaway_detector,
+            )
+        finally:
+            release_generation_memory(tts_model)
 
     if profile.effects_chain:
         import json

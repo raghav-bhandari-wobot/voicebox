@@ -877,6 +877,10 @@
         "title": "Autoplay on generate",
         "description": "Automatically play audio when a generation completes."
       },
+      "unloadOtherEngines": {
+        "title": "Keep one voice engine loaded",
+        "description": "Unload other voice engines from memory before loading a different one, so switching engines can't run out of GPU memory. On by default for GPUs with 12 GB or less."
+      },
       "folder": {
         "title": "Generations folder",
         "description": "Where generated audio files are stored on disk.",

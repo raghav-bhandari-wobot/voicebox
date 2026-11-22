@@ -328,6 +328,28 @@ class GenerationSettingsResponse(BaseModel):
     crossfade_ms: int = Field(default=50, ge=0, le=500)
     normalize_audio: bool = True
     autoplay_on_generate: bool = True
+    # Unload other TTS engines before loading one. Stored as NULL until the
+    # user picks a value; NULL resolves to the auto default (on for CUDA
+    # devices with <= 12 GB of VRAM).
+    unload_other_engines: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_unload_other_engines(cls, data: Any) -> Any:
+        from .backends import default_unload_other_engines
+
+        if isinstance(data, dict):
+            if data.get("unload_other_engines") is None:
+                data = {**data, "unload_other_engines": default_unload_other_engines()}
+            return data
+        if getattr(data, "unload_other_engines", None) is None:
+            data = {
+                name: getattr(data, name)
+                for name in cls.model_fields
+                if name != "unload_other_engines" and hasattr(data, name)
+            }
+            data["unload_other_engines"] = default_unload_other_engines()
+        return data
 
     class Config:
         from_attributes = True
@@ -340,6 +362,7 @@ class GenerationSettingsUpdate(BaseModel):
     crossfade_ms: Optional[int] = Field(default=None, ge=0, le=500)
     normalize_audio: Optional[bool] = None
     autoplay_on_generate: Optional[bool] = None
+    unload_other_engines: Optional[bool] = None
 
 
 class MCPClientBindingResponse(BaseModel):

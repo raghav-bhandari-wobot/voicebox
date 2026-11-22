@@ -271,6 +271,8 @@ export interface GenerationSettings {
   crossfade_ms: number;
   normalize_audio: boolean;
   autoplay_on_generate: boolean;
+  /** Unload other TTS engines before loading one. Defaults on for GPUs with <= 12 GB. */
+  unload_other_engines: boolean;
 }
 
 export type GenerationSettingsUpdate = Partial<GenerationSettings>;
