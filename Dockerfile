@@ -72,6 +72,12 @@ RUN if [ "$PYTORCH_VARIANT" = "rocm" ]; then \
       printf '[global]\nindex-url = https://download.pytorch.org/whl/%s\nextra-index-url = https://pypi.org/simple\n' "$CUDA_VERSION" > /etc/pip.conf; \
     fi
 
+# Make packages already installed into /install visible to the later pip runs.
+# Otherwise pip can't see the GPU torch from the step above and re-resolves
+# `torch>=2.5` to the newest PyPI build (different CUDA version), installing a
+# second torch + NVIDIA libs on top of the first.
+ENV PYTHONPATH=/install/lib/python3.12/site-packages
+
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 RUN pip install --no-cache-dir --prefix=/install --no-deps chatterbox-tts
 RUN pip install --no-cache-dir --prefix=/install --no-deps hume-tada
