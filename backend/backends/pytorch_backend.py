@@ -5,6 +5,7 @@ PyTorch backend implementation for TTS and STT.
 from typing import Optional, List, Tuple
 import asyncio
 import logging
+import threading
 import torch
 import numpy as np
 
@@ -258,6 +259,12 @@ class PyTorchSTTBackend:
         self.processor = None
         self.model_size = model_size
         self.device = self._get_device()
+        # Serializes Whisper loads. Concurrent from_pretrained() calls in
+        # separate threads (e.g. several /transcribe requests while the model
+        # is still downloading) race on transformers' global meta-device init
+        # and leave proj_out.weight on "meta", so every later transcription
+        # fails with "Tensor on device meta is not on the expected device".
+        self._load_lock = threading.Lock()
 
     def _get_device(self) -> str:
         """Get the best available device."""
@@ -291,21 +298,32 @@ class PyTorchSTTBackend:
 
     def _load_model_sync(self, model_size: str):
         """Synchronous model loading."""
-        progress_model_name = f"whisper-{model_size}"
-        is_cached = self._is_model_cached(model_size)
+        with self._load_lock:
+            # Another request may have finished loading this model while we
+            # waited for the lock.
+            if self.model is not None and self.model_size == model_size:
+                return
 
-        with model_load_progress(progress_model_name, is_cached):
-            from transformers import WhisperProcessor, WhisperForConditionalGeneration
+            progress_model_name = f"whisper-{model_size}"
+            is_cached = self._is_model_cached(model_size)
 
-            model_name = WHISPER_HF_REPOS.get(model_size, f"openai/whisper-{model_size}")
-            logger.info("Loading Whisper model %s on %s...", model_size, self.device)
+            with model_load_progress(progress_model_name, is_cached):
+                from transformers import WhisperProcessor, WhisperForConditionalGeneration
 
-            self.processor = WhisperProcessor.from_pretrained(model_name)
-            self.model = WhisperForConditionalGeneration.from_pretrained(model_name)
+                model_name = WHISPER_HF_REPOS.get(model_size, f"openai/whisper-{model_size}")
+                logger.info("Loading Whisper model %s on %s...", model_size, self.device)
 
-        self.model.to(self.device)
-        self.model_size = model_size
-        logger.info("Whisper model %s loaded successfully", model_size)
+                processor = WhisperProcessor.from_pretrained(model_name)
+                model = WhisperForConditionalGeneration.from_pretrained(model_name)
+
+            model.to(self.device)
+
+            # Publish only the fully loaded, on-device model so is_loaded()
+            # never reports a half-initialized one.
+            self.processor = processor
+            self.model = model
+            self.model_size = model_size
+            logger.info("Whisper model %s loaded successfully", model_size)
 
     def unload_model(self):
         """Unload the model to free memory."""
