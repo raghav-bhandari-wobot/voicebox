@@ -1,0 +1,31 @@
+---
+# CUDA (NVIDIA GPU) overlay for Voicebox
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
+#
+# Requires an NVIDIA driver on the host plus GPU support in Docker:
+#   - Windows: Docker Desktop with the WSL 2 backend (GPU passthrough is built in)
+#   - Linux:   NVIDIA Container Toolkit
+# Check with: docker run --rm --gpus all ubuntu:24.04 nvidia-smi
+
+services:
+  voicebox:
+    build:
+      context: .
+      args:
+        PYTORCH_VARIANT: cuda
+        CUDA_VERSION: ${CUDA_VERSION:-cu128}
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Reduce fragmentation when switching between engines on smaller GPUs.
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
