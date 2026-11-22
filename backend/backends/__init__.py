@@ -12,7 +12,12 @@ and a model config registry that eliminates per-engine dispatch maps.
 # HF_HUB_OFFLINE=1 and on network failures.
 from ..utils import hf_offline_patch  # noqa: F401
 
+import asyncio
+import contextvars
+import inspect
+import logging
 import threading
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Protocol, Optional, Tuple, List
 from typing_extensions import runtime_checkable
@@ -673,14 +678,244 @@ def engine_has_model_sizes(engine: str) -> bool:
 
 
 async def load_engine_model(engine: str, model_size: str = "default") -> None:
-    """Load a model for the given engine, handling engines with multiple model sizes."""
-    backend = get_tts_backend_for_engine(engine)
-    if engine in ("qwen", "qwen_custom_voice"):
-        await backend.load_model_async(model_size)
-    elif engine in SIZED_TTS_ENGINES:
-        await backend.load_model(model_size)
+    """Load a model for the given engine, handling engines with multiple model sizes.
+
+    When "unload other engines" is on, every other resident TTS engine is
+    unloaded first (see :func:`run_exclusive_tts_load`).
+    """
+
+    async def _load() -> None:
+        backend = get_tts_backend_for_engine(engine)
+        if engine in ("qwen", "qwen_custom_voice"):
+            await backend.load_model_async(model_size)
+        elif engine in SIZED_TTS_ENGINES:
+            await backend.load_model(model_size)
+        else:
+            await backend.load_model()
+
+    await run_exclusive_tts_load(engine, _load)
+
+
+# ---------------------------------------------------------------------------
+# TTS engine residency: keep one TTS engine in GPU memory at a time
+# ---------------------------------------------------------------------------
+#
+# Every TTS backend stays cached in ``_tts_backends`` once loaded, so switching
+# engines used to stack their weights in VRAM (VoxCPM2 ~5.6 GB + ZONOS3 Mini
+# ~2.6 GB overflows an 8 GB card). With "unload other engines" on, loading a
+# TTS engine first unloads every *other* loaded TTS engine.
+#
+# Safety with concurrent requests: the serial generation queue
+# (``services/task_queue``) only covers queued generations. ``/generate/stream``,
+# the OpenAI-compatible ``/v1/audio/speech`` route, ``/profiles/{id}/speak``
+# (persist=false) and Models-page loads/downloads run outside it. So every path
+# that loads or generates with a TTS engine holds it via
+# :func:`tts_engine_in_use`, a per-engine use count. In exclusive mode,
+# acquiring engine B waits until no *other* engine is in use, so a switch never
+# unloads a backend mid-generation and two engines are never both mid-use.
+# Same-engine requests still run concurrently as before.
+#
+# Whisper (STT) and the local LLM are deliberately left alone: they are small
+# next to the TTS models (Whisper base/small < 1 GB), are used by different
+# flows (dictation / refinement) that may legitimately overlap a TTS
+# generation, and unloading them would add reload latency to every dictation
+# without addressing the measured OOM (TTS + TTS).
+#
+# Sizes of the *same* engine (Qwen 1.7B/0.6B, VoxCPM 2B/0.5B, TADA) are handled
+# by the backend itself: its ``load_model(size)`` unloads the old size first.
+
+logger = logging.getLogger(__name__)
+
+# ``None`` = auto (on for CUDA devices with <= 12 GB, see
+# :func:`default_unload_other_engines`). Seeded from the persisted generation
+# settings on startup and on every settings write.
+_unload_other_engines: Optional[bool] = None
+_default_unload_other_engines: Optional[bool] = None
+
+# Engines are "in use" while a load or generation holds them.
+_engine_use_counts: dict[str, int] = {}
+_engine_residency_cond: Optional[asyncio.Condition] = None
+_engine_residency_loop: Optional[asyncio.AbstractEventLoop] = None
+# Engines held by the current task. Makes nested holds (a generation that calls
+# ``load_engine_model`` for its own engine) re-entrant without waiting.
+_held_engines: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
+    "voicebox_held_tts_engines", default=frozenset()
+)
+
+# Cards sold as 12 GB report slightly under or over 12 GiB.
+_SMALL_GPU_VRAM_BYTES = int(12.5 * 1024**3)
+
+
+def default_unload_other_engines() -> bool:
+    """Auto default: on for a CUDA/ROCm device with <= 12 GB of VRAM, else off."""
+    global _default_unload_other_engines
+    if _default_unload_other_engines is None:
+        result = False
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                total = torch.cuda.get_device_properties(0).total_memory
+                result = total <= _SMALL_GPU_VRAM_BYTES
+        except Exception:
+            result = False
+        _default_unload_other_engines = result
+    return _default_unload_other_engines
+
+
+def set_unload_other_engines(value: Optional[bool]) -> None:
+    """Set the persisted preference (``None`` = auto)."""
+    global _unload_other_engines
+    _unload_other_engines = value
+
+
+def should_unload_other_engines() -> bool:
+    """Effective value of the "unload other engines before loading" setting."""
+    if _unload_other_engines is None:
+        return default_unload_other_engines()
+    return bool(_unload_other_engines)
+
+
+def _get_residency_cond() -> asyncio.Condition:
+    """The residency condition, recreated if the running event loop changed.
+
+    asyncio primitives bind to the first loop that uses them; tests (and an
+    in-process server restart) run on fresh loops.
+    """
+    global _engine_residency_cond, _engine_residency_loop
+    loop = asyncio.get_running_loop()
+    if _engine_residency_cond is None or _engine_residency_loop is not loop:
+        _engine_residency_cond = asyncio.Condition()
+        _engine_residency_loop = loop
+    return _engine_residency_cond
+
+
+def _other_engine_in_use(engine: str) -> bool:
+    return any(count > 0 for name, count in _engine_use_counts.items() if name != engine)
+
+
+def get_tts_engines_in_use() -> dict[str, int]:
+    """Snapshot of engines currently held by a load or generation."""
+    return {name: count for name, count in _engine_use_counts.items() if count > 0}
+
+
+@dataclass
+class _EngineHold:
+    engine: str
+    token: Optional[contextvars.Token]
+
+
+async def acquire_tts_engine(engine: str) -> _EngineHold:
+    """Mark ``engine`` as in use; release with :func:`release_tts_engine`.
+
+    In exclusive mode this waits until no other engine is in use. Prefer the
+    :func:`tts_engine_in_use` context manager; the explicit pair exists for
+    code whose own try/finally already spans the work.
+    """
+    held = _held_engines.get()
+    if engine in held:
+        # Nested hold from the same task: the outer hold already waited.
+        _engine_use_counts[engine] = _engine_use_counts.get(engine, 0) + 1
+        return _EngineHold(engine, None)
+
+    cond = _get_residency_cond()
+    async with cond:
+        if should_unload_other_engines() and _other_engine_in_use(engine):
+            logger.info(
+                "Waiting for %s to finish before switching to %s",
+                ", ".join(sorted(get_tts_engines_in_use())),
+                engine,
+            )
+            await cond.wait_for(
+                lambda: not should_unload_other_engines() or not _other_engine_in_use(engine)
+            )
+        _engine_use_counts[engine] = _engine_use_counts.get(engine, 0) + 1
+    return _EngineHold(engine, _held_engines.set(held | {engine}))
+
+
+async def release_tts_engine(hold: _EngineHold) -> None:
+    """Release a hold taken by :func:`acquire_tts_engine`."""
+    count = _engine_use_counts.get(hold.engine, 0) - 1
+    if count > 0:
+        _engine_use_counts[hold.engine] = count
     else:
-        await backend.load_model()
+        _engine_use_counts.pop(hold.engine, None)
+    if hold.token is None:
+        return
+    try:
+        _held_engines.reset(hold.token)
+    except ValueError:
+        # Released from a different context than it was acquired in.
+        _held_engines.set(_held_engines.get() - {hold.engine})
+    cond = _get_residency_cond()
+    async with cond:
+        cond.notify_all()
+
+
+@asynccontextmanager
+async def tts_engine_in_use(engine: str):
+    """Hold ``engine`` for the duration of a load + generation."""
+    hold = await acquire_tts_engine(engine)
+    try:
+        yield
+    finally:
+        await release_tts_engine(hold)
+
+
+def unload_other_tts_engines(keep_engine: str) -> list[str]:
+    """Unload every loaded TTS engine except ``keep_engine``.
+
+    Only touches backends that were already instantiated, and skips any engine
+    that is currently in use (defensive: in exclusive mode the caller holds
+    ``keep_engine``, so no other engine can be in use). Returns the names of
+    what was unloaded.
+    """
+    unloaded: list[str] = []
+    configs = get_tts_model_configs()
+    for engine_name, backend in list(_tts_backends.items()):
+        if engine_name == keep_engine:
+            continue
+        if _engine_use_counts.get(engine_name, 0) > 0:
+            logger.warning("Not unloading %s: it is in use", engine_name)
+            continue
+        try:
+            if not backend.is_loaded():
+                continue
+        except Exception:
+            continue
+        try:
+            for cfg in configs:
+                if cfg.engine == engine_name and unload_model_by_config(cfg):
+                    unloaded.append(cfg.model_name)
+            if backend.is_loaded():
+                # No config matched the loaded size (or none is registered on
+                # this platform): unload the backend directly.
+                from ..utils.cache import clear_voice_prompt_memory_cache
+
+                clear_voice_prompt_memory_cache()
+                backend.unload_model()
+                unloaded.append(engine_name)
+        except Exception as e:
+            logger.warning("Failed to unload %s before switching engines: %s", engine_name, e)
+    if unloaded:
+        logger.info("Unloaded %s before loading %s", ", ".join(unloaded), keep_engine)
+    return unloaded
+
+
+async def run_exclusive_tts_load(engine: str, loader):
+    """Run ``loader()`` (sync or async) while holding ``engine``.
+
+    When "unload other engines" is on, every other loaded TTS engine is
+    unloaded first. In-flight generations on other engines are waited for,
+    never unloaded underneath.
+    """
+    async with tts_engine_in_use(engine):
+        if should_unload_other_engines():
+            unload_other_tts_engines(engine)
+        result = loader()
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
 
 async def ensure_model_cached_or_raise(engine: str, model_size: str = "default") -> None:
@@ -799,16 +1034,17 @@ def get_model_load_func(config: ModelConfig):
     if config.engine == "whisper":
         return lambda: transcribe.get_whisper_model().load_model(config.model_size)
 
-    if config.engine == "qwen":
-        return lambda: tts.get_tts_model().load_model(config.model_size)
-
-    if config.engine == "qwen_custom_voice" or config.engine == "voxcpm":
-        return lambda: get_tts_backend_for_engine(config.engine).load_model(config.model_size)
-
     if config.engine == "qwen_llm":
         return lambda: get_llm_backend_for_engine("qwen_llm").load_model(config.model_size)
 
-    return lambda: get_tts_backend_for_engine(config.engine).load_model()
+    # TTS engines: unload the other TTS engines first when that setting is on.
+    if config.engine == "qwen":
+        raw = lambda: tts.get_tts_model().load_model(config.model_size)  # noqa: E731
+    elif config.engine == "qwen_custom_voice" or config.engine == "voxcpm":
+        raw = lambda: get_tts_backend_for_engine(config.engine).load_model(config.model_size)  # noqa: E731
+    else:
+        raw = lambda: get_tts_backend_for_engine(config.engine).load_model()  # noqa: E731
+    return lambda: run_exclusive_tts_load(config.engine, raw)
 
 
 def get_tts_backend() -> TTSBackend:
@@ -1040,6 +1276,7 @@ def reset_backends():
     global _custom_llm_endpoint, _custom_llm_model, _custom_llm_api_key
     _tts_backend = None
     _tts_backends.clear()
+    _engine_use_counts.clear()
     _stt_backend = None
     _llm_backends.clear()
     _custom_llm_endpoint = None

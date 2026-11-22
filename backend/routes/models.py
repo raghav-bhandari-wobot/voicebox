@@ -96,8 +96,10 @@ async def load_model(
 
     size = requested_size or DEFAULT_QWEN_MODEL_SIZE
     try:
+        from ..backends import run_exclusive_tts_load
+
         tts_model = tts.get_tts_model()
-        await tts_model.load_model_async(size)
+        await run_exclusive_tts_load("qwen", lambda: tts_model.load_model_async(size))
         return {"message": f"Model {size} loaded successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e

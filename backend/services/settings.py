@@ -130,13 +130,27 @@ def get_generation_settings(db: Session) -> DBGenerationSettings:
 def update_generation_settings(db: Session, patch: dict[str, Any]) -> DBGenerationSettings:
     """Apply a partial update to the generation-settings singleton and persist it.
 
-    Unlike :func:`update_capture_settings`, no runtime state depends on
-    these values — the fields flow directly into the next
-    ``run_generation`` invocation via ``GenerationSettings`` — so the
-    commit is enough.
+    Most fields flow directly into the next ``run_generation`` invocation
+    via ``GenerationSettings``. ``unload_other_engines`` is runtime state
+    read by the backend loader, so it is pushed into the backends module
+    after the commit (see :func:`_sync_generation_backend_config`).
     """
     row = _get_or_create_generation_row(db)
     _apply_patch(row, patch)
     db.commit()
     db.refresh(row)
+    _sync_generation_backend_config(row)
     return row
+
+
+def _sync_generation_backend_config(row: DBGenerationSettings) -> None:
+    """Push the persisted "unload other engines" preference into the backends module."""
+    from .. import backends
+
+    backends.set_unload_other_engines(row.unload_other_engines)
+
+
+def bootstrap_generation_backend_config(db: Session) -> None:
+    """Seed backend runtime state from the persisted generation settings on startup."""
+    row = _get_or_create_generation_row(db)
+    _sync_generation_backend_config(row)

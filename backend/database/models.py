@@ -239,6 +239,9 @@ class GenerationSettings(Base):
     crossfade_ms = Column(Integer, nullable=False, default=50)
     normalize_audio = Column(Boolean, nullable=False, default=True)
     autoplay_on_generate = Column(Boolean, nullable=False, default=True)
+    # Unload other TTS engines before loading one. NULL = auto (on for CUDA
+    # devices with <= 12 GB of VRAM); see backends.should_unload_other_engines.
+    unload_other_engines = Column(Boolean, nullable=True, default=None)
     updated_at = Column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
 

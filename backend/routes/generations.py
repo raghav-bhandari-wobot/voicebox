@@ -327,6 +327,7 @@ async def stream_speech(
         ensure_model_cached_or_raise,
         get_tts_backend_for_engine,
         load_engine_model,
+        tts_engine_in_use,
     )
 
     profile = await profiles.get_profile(data.profile_id, db)
@@ -342,42 +343,45 @@ async def stream_speech(
     model_size = data.model_size or "1.7B"
 
     await ensure_model_cached_or_raise(engine, model_size)
-    await load_engine_model(engine, model_size)
+    # Hold the engine from load through generation so a concurrent switch to
+    # another engine waits instead of unloading it (backends.tts_engine_in_use).
+    async with tts_engine_in_use(engine):
+        await load_engine_model(engine, model_size)
 
-    voice_prompt = await profiles.create_voice_prompt_for_profile(
-        data.profile_id,
-        db,
-        engine=engine,
-    )
-
-    from ..utils.chunked_tts import generate_chunked
-
-    trim_fn = None
-    runaway_detector = None
-    if engine_needs_trim(engine):
-        from ..utils.audio import trim_tts_output
-
-        trim_fn = trim_tts_output
-    if engine_retries_runaway(engine):
-        from ..utils.audio import has_tts_runaway
-
-        runaway_detector = has_tts_runaway
-
-    try:
-        audio, sample_rate = await generate_chunked(
-            tts_model,
-            data.text,
-            voice_prompt,
-            language=data.language,
-            seed=data.seed,
-            instruct=data.instruct,
-            max_chunk_chars=data.max_chunk_chars,
-            crossfade_ms=data.crossfade_ms,
-            trim_fn=trim_fn,
-            runaway_detector=runaway_detector,
+        voice_prompt = await profiles.create_voice_prompt_for_profile(
+            data.profile_id,
+            db,
+            engine=engine,
         )
-    finally:
-        release_generation_memory(tts_model)
+
+        from ..utils.chunked_tts import generate_chunked
+
+        trim_fn = None
+        runaway_detector = None
+        if engine_needs_trim(engine):
+            from ..utils.audio import trim_tts_output
+
+            trim_fn = trim_tts_output
+        if engine_retries_runaway(engine):
+            from ..utils.audio import has_tts_runaway
+
+            runaway_detector = has_tts_runaway
+
+        try:
+            audio, sample_rate = await generate_chunked(
+                tts_model,
+                data.text,
+                voice_prompt,
+                language=data.language,
+                seed=data.seed,
+                instruct=data.instruct,
+                max_chunk_chars=data.max_chunk_chars,
+                crossfade_ms=data.crossfade_ms,
+                trim_fn=trim_fn,
+                runaway_detector=runaway_detector,
+            )
+        finally:
+            release_generation_memory(tts_model)
 
     effects_chain_config = None
     if data.effects_chain is not None:

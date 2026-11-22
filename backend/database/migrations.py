@@ -42,6 +42,7 @@ def run_migrations(engine) -> None:
     _migrate_effect_presets(engine, inspector, tables)
     _migrate_generation_versions(engine, inspector, tables)
     _migrate_capture_settings(engine, inspector, tables)
+    _migrate_generation_settings(engine, inspector, tables)
     _migrate_mcp_bindings(engine, inspector, tables)
     _normalize_storage_paths(engine, tables)
     _migrate_add_indexes(engine, tables)
@@ -264,6 +265,20 @@ def _migrate_capture_settings(engine, inspector, tables: set[str]) -> None:
             "capture_settings",
             "custom_llm_api_key VARCHAR",
             "custom_llm_api_key",
+        )
+
+
+def _migrate_generation_settings(engine, inspector, tables: set[str]) -> None:
+    if "generation_settings" not in tables:
+        return
+    columns = _get_columns(inspector, "generation_settings")
+    if "unload_other_engines" not in columns:
+        # NULL = auto (resolved from the GPU's VRAM at runtime).
+        _add_column(
+            engine,
+            "generation_settings",
+            "unload_other_engines BOOLEAN",
+            "unload_other_engines",
         )
 
 
