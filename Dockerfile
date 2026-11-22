@@ -5,6 +5,7 @@
 # Build variants:
 #   CPU (default):  docker compose up --build
 #   ROCm (AMD GPU): docker compose -f docker-compose.yml -f docker-compose.rocm.yml up --build
+#   CUDA (NVIDIA):  docker compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
 # ============================================================
 
 # Top-level ARG so it is visible to all stages.
@@ -51,13 +52,24 @@ COPY backend/requirements.txt .
 # ROCm wheel index. Default 6.3 (RDNA1/2/3); set ROCM_VERSION=7.2 for RDNA4.
 ARG ROCM_VERSION=6.3
 
+# CUDA wheel tag for PYTORCH_VARIANT=cuda. cu128 matches the desktop app's
+# CUDA backend and covers sm_80/86/89/90/120 (RTX 30/40/50 series).
+ARG CUDA_VERSION=cu128
+
 # For ROCm, make the PyTorch ROCm index primary so every install below resolves
 # torch to ROCm wheels instead of the default CUDA build.
+# For CUDA (NVIDIA), do the same with the PyTorch CUDA index so torch is pinned
+# to the cu128 build rather than whatever CUDA build PyPI happens to ship.
 RUN if [ "$PYTORCH_VARIANT" = "rocm" ]; then \
       pip install --no-cache-dir --prefix=/install \
         --index-url "https://download.pytorch.org/whl/rocm${ROCM_VERSION}" \
         torch torchaudio && \
       printf '[global]\nindex-url = https://download.pytorch.org/whl/rocm%s\nextra-index-url = https://pypi.org/simple\n' "$ROCM_VERSION" > /etc/pip.conf; \
+    elif [ "$PYTORCH_VARIANT" = "cuda" ]; then \
+      pip install --no-cache-dir --prefix=/install \
+        --index-url "https://download.pytorch.org/whl/${CUDA_VERSION}" \
+        torch torchaudio && \
+      printf '[global]\nindex-url = https://download.pytorch.org/whl/%s\nextra-index-url = https://pypi.org/simple\n' "$CUDA_VERSION" > /etc/pip.conf; \
     fi
 
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
