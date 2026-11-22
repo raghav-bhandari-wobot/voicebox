@@ -84,6 +84,13 @@ RUN pip install --no-cache-dir --prefix=/install --no-deps hume-tada
 RUN pip install --no-cache-dir --prefix=/install --no-deps omnivoice
 RUN pip install --no-cache-dir --prefix=/install \
     git+https://github.com/QwenLM/Qwen3-TTS.git
+# VoxCPM: --no-deps because its requirements pull gradio, funasr, modelscope and
+# datasets for the web demo / denoiser / fine-tuning, none of which the
+# inference path uses; its real runtime deps are already installed above.
+# zyphra-textnorm (no deps): ZONOS3's number/date/currency normalizer.
+# Kept as the last step so adding it doesn't invalidate the layers above.
+RUN pip install --no-cache-dir --prefix=/install --no-deps \
+    voxcpm==2.0.3 zyphra-textnorm==0.3.1
 
 
 # === Stage 3: Runtime ===

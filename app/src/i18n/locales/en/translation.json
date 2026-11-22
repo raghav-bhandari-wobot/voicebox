@@ -718,7 +718,8 @@
       "hide": "Hide delivery instructions",
       "tooltip": "Delivery instructions (tone, emotion, pace)",
       "placeholder": "Delivery instructions — e.g. Speak slowly with warmth, Authoritative and clear…",
-      "placeholderOmnivoice": "Voice attributes, comma-separated — e.g. female, low pitch, british accent (fixed vocabulary: gender, age, pitch, whisper, accent)"
+      "placeholderOmnivoice": "Voice attributes, comma-separated — e.g. female, low pitch, british accent (fixed vocabulary: gender, age, pitch, whisper, accent)",
+      "placeholderVoxcpm": "Style for VoxCPM2 — e.g. cheerful, slightly faster, whispering (ignored by the 0.5B model)"
     },
     "voiceSelector": {
       "placeholder": "Select a voice…"

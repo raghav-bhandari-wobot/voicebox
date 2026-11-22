@@ -239,7 +239,14 @@ TTS_ENGINES = {
     "tada": "TADA",
     "kokoro": "Kokoro",
     "omnivoice": "OmniVoice",
+    "zonos3": "ZONOS3 Mini",
+    "voxcpm": "VoxCPM",
 }
+
+# Engines that ship more than one model size and need the size threaded through
+# load / cache / unload / loaded checks. (Qwen and Qwen CustomVoice have their
+# own branches below.)
+SIZED_TTS_ENGINES = ("tada", "voxcpm")
 
 LLM_ENGINES = {
     "qwen_llm": "Qwen3 LLM",
@@ -470,6 +477,41 @@ def _get_non_qwen_tts_configs() -> list[ModelConfig]:
                 "tr",
             ],
         ),
+        ModelConfig(
+            model_name="zonos3-mini",
+            display_name="ZONOS3 Mini",
+            engine="zonos3",
+            hf_repo_id="Zyphra/ZONOS3-Mini-hf",
+            size_mb=2300,
+            # ZONOS3 covers 43 languages; these are the ones in Voicebox's
+            # language enum (all but Swahili).
+            languages=[
+                "en", "zh", "ja", "ko", "de", "fr", "ru", "pt", "es", "it", "he",
+                "ar", "da", "el", "fi", "hi", "ms", "nl", "no", "pl", "sv", "tr",
+            ],
+        ),
+        ModelConfig(
+            model_name="voxcpm-2b",
+            display_name="VoxCPM2 (2B, Multilingual)",
+            engine="voxcpm",
+            hf_repo_id="openbmb/VoxCPM2",
+            model_size="2B",
+            size_mb=4750,
+            supports_instruct=True,
+            languages=[
+                "zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it", "he", "ar",
+                "da", "el", "fi", "hi", "ms", "nl", "no", "pl", "sv", "sw", "tr",
+            ],
+        ),
+        ModelConfig(
+            model_name="voxcpm-0.5b",
+            display_name="VoxCPM 0.5B (Chinese/English)",
+            engine="voxcpm",
+            hf_repo_id="openbmb/VoxCPM-0.5B",
+            model_size="0.5B",
+            size_mb=1550,
+            languages=["en", "zh"],
+        ),
     ]
 
 
@@ -635,7 +677,7 @@ async def load_engine_model(engine: str, model_size: str = "default") -> None:
     backend = get_tts_backend_for_engine(engine)
     if engine in ("qwen", "qwen_custom_voice"):
         await backend.load_model_async(model_size)
-    elif engine == "tada":
+    elif engine in SIZED_TTS_ENGINES:
         await backend.load_model(model_size)
     else:
         await backend.load_model()
@@ -652,7 +694,7 @@ async def ensure_model_cached_or_raise(engine: str, model_size: str = "default")
             cfg = c
             break
 
-    if engine in ("qwen", "qwen_custom_voice", "tada"):
+    if engine in ("qwen", "qwen_custom_voice", *SIZED_TTS_ENGINES):
         if not backend._is_model_cached(model_size):
             raise HTTPException(
                 status_code=400,
@@ -700,7 +742,7 @@ def unload_model_by_config(config: ModelConfig) -> bool:
             return True
         return False
 
-    if config.engine == "qwen_custom_voice":
+    if config.engine == "qwen_custom_voice" or config.engine == "voxcpm":
         backend = get_tts_backend_for_engine(config.engine)
         loaded_size = getattr(backend, "_current_model_size", None) or getattr(backend, "model_size", None)
         if backend.is_loaded() and loaded_size == config.model_size:
@@ -738,7 +780,7 @@ def check_model_loaded(config: ModelConfig) -> bool:
             loaded_size = getattr(tts_model, "_current_model_size", None) or getattr(tts_model, "model_size", None)
             return tts_model.is_loaded() and loaded_size == config.model_size
 
-        if config.engine == "qwen_custom_voice":
+        if config.engine == "qwen_custom_voice" or config.engine == "voxcpm":
             backend = get_tts_backend_for_engine(config.engine)
             loaded_size = getattr(backend, "_current_model_size", None) or getattr(backend, "model_size", None)
             return backend.is_loaded() and loaded_size == config.model_size
@@ -760,7 +802,7 @@ def get_model_load_func(config: ModelConfig):
     if config.engine == "qwen":
         return lambda: tts.get_tts_model().load_model(config.model_size)
 
-    if config.engine == "qwen_custom_voice":
+    if config.engine == "qwen_custom_voice" or config.engine == "voxcpm":
         return lambda: get_tts_backend_for_engine(config.engine).load_model(config.model_size)
 
     if config.engine == "qwen_llm":
@@ -842,6 +884,14 @@ def get_tts_backend_for_engine(engine: str) -> TTSBackend:
             from .omnivoice_backend import OmniVoiceBackend
 
             backend = OmniVoiceBackend()
+        elif engine == "zonos3":
+            from .zonos3_backend import Zonos3Backend
+
+            backend = Zonos3Backend()
+        elif engine == "voxcpm":
+            from .voxcpm_backend import VoxCPMBackend
+
+            backend = VoxCPMBackend()
         elif engine == "qwen_custom_voice":
             from .qwen_custom_voice_backend import QwenCustomVoiceBackend
 

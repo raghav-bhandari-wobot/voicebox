@@ -98,6 +98,17 @@ export const ENGINE_LANGUAGES: Record<string, readonly LanguageCode[]> = {
     'tr',
     'zh',
   ],
+  // ZONOS3 covers 43 languages; all of ALL_LANGUAGES except Swahili.
+  zonos3: [
+    'ar', 'da', 'de', 'el', 'en', 'es', 'fi', 'fr', 'he', 'hi', 'it',
+    'ja', 'ko', 'ms', 'nl', 'no', 'pl', 'pt', 'ru', 'sv', 'tr', 'zh',
+  ],
+  // VoxCPM2 (2B). The 0.5B size is Chinese/English only; the engine selector
+  // narrows the language when that size is picked.
+  voxcpm: [
+    'ar', 'da', 'de', 'el', 'en', 'es', 'fi', 'fr', 'he', 'hi', 'it', 'ja',
+    'ko', 'ms', 'nl', 'no', 'pl', 'pt', 'ru', 'sv', 'sw', 'tr', 'zh',
+  ],
 } as const;
 
 /** Helper: get language options for a given engine. */

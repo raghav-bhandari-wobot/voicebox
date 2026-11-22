@@ -29,6 +29,9 @@ const ENGINE_OPTIONS = [
   { value: 'tada:3B', label: 'TADA 3B Multilingual', engine: 'tada' },
   { value: 'kokoro', label: 'Kokoro 82M', engine: 'kokoro' },
   { value: 'omnivoice', label: 'OmniVoice (non-commercial)', engine: 'omnivoice' },
+  { value: 'zonos3', label: 'ZONOS3 Mini', engine: 'zonos3' },
+  { value: 'voxcpm:2B', label: 'VoxCPM2 2B', engine: 'voxcpm' },
+  { value: 'voxcpm:0.5B', label: 'VoxCPM 0.5B (zh/en)', engine: 'voxcpm' },
 ] as const;
 
 const ENGINE_DESCRIPTIONS: Record<string, string> = {
@@ -41,6 +44,8 @@ const ENGINE_DESCRIPTIONS: Record<string, string> = {
   tada: 'HumeAI, 700s+ coherent audio',
   kokoro: '82M params, CPU realtime, 8 langs',
   omnivoice: '23 languages, voice design. CC-BY-NC weights: non-commercial use only',
+  zonos3: 'Zyphra, 22 languages, cloning + 25 built-in voices, 44.1kHz',
+  voxcpm: 'OpenBMB, 2B: 23 languages + style control, 48kHz; 0.5B: zh/en',
 };
 
 /** Engines that only support English and should force language to 'en' on select. */
@@ -54,6 +59,8 @@ const CLONING_ENGINES = new Set([
   'chatterbox_turbo',
   'tada',
   'omnivoice',
+  'zonos3',
+  'voxcpm',
 ]);
 
 /** Engines that synthesise a voice from a written description. */
@@ -68,6 +75,7 @@ function getSelectValue(engine: string, modelSize?: string): string {
   if (engine === 'qwen') return `qwen:${modelSize || '1.7B'}`;
   if (engine === 'qwen_custom_voice') return `qwen_custom_voice:${modelSize || '1.7B'}`;
   if (engine === 'tada') return `tada:${modelSize || '1B'}`;
+  if (engine === 'voxcpm') return `voxcpm:${modelSize === '0.5B' ? '0.5B' : '2B'}`;
   return engine;
 }
 
@@ -90,6 +98,19 @@ export function applyEngineSelection(form: UseFormReturn<GenerationFormValues>, 
     const available = getLanguageOptionsForEngine('qwen');
     if (!available.some((l) => l.value === currentLang)) {
       form.setValue('language', available[0]?.value ?? 'en');
+    }
+  } else if (value.startsWith('voxcpm:')) {
+    const [, modelSize] = value.split(':');
+    form.setValue('engine', 'voxcpm');
+    form.setValue('modelSize', modelSize as '2B' | '0.5B');
+    // VoxCPM 0.5B is Chinese/English only; VoxCPM2 is multilingual
+    const currentLang = form.getValues('language');
+    const available =
+      modelSize === '0.5B'
+        ? getLanguageOptionsForEngine('voxcpm').filter((l) => l.value === 'en' || l.value === 'zh')
+        : getLanguageOptionsForEngine('voxcpm');
+    if (!available.some((l) => l.value === currentLang)) {
+      form.setValue('language', 'en');
     }
   } else if (value.startsWith('tada:')) {
     const [, modelSize] = value.split(':');
